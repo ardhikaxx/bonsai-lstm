@@ -391,7 +391,7 @@ membagi data training/testing, lalu menyimpan semua artefak.
 ```python
 DATA_PATH      = "../data/raw/dataset_bonsai_lstm.csv"
 ARTIFACTS_DIR  = "../artifacts"
-TRAIN_RATIO    = 0.80          # 80% training, 20% testing
+TRAIN_RATIO    = 0.60          # 60% training, 40% testing
 LOOK_BACK      = 24            # 24 langkah × 30 menit = 12 jam historis
 SOIL_THRESHOLD = 60.0          # % batas keputusan penyiraman
 FEATURES       = ["temperature_c", "humidity_air_pct", "soil_moisture_pct"]
@@ -472,8 +472,8 @@ print(f"[CLEAN-05] Duplikat timestamp dihapus: {n_dup} | Sisa: {len(df)}")
 ```
 WAJIB dilakukan SEBELUM normalisasi untuk mencegah data leakage.
 WAJIB menggunakan split kronologis — DILARANG random split.
-  Training : 80% pertama secara kronologis
-  Testing  : 20% terakhir secara kronologis
+  Training : 60% pertama secara kronologis
+  Testing  : 40% terakhir secara kronologis
 ```
 
 ```python
@@ -554,9 +554,12 @@ print(f"[SEQ] X_test  shape : {X_test.shape}")
 ```
 Inverse-transform y (skala normal) → skala asli (%) sebelum membuat label.
 
-Label biner berdasarkan threshold SOIL_THRESHOLD = 60%:
-  1 → BUTUH PENYIRAMAN   (soil_moisture_pct < 60%)
-  0 → TIDAK BUTUH SIRAM  (soil_moisture_pct ≥ 60%)
+Label biner berdasarkan kondisi multi-sensor (2-of-3):
+  1 → BUTUH PENYIRAMAN if >=2 of 3 conditions:
+      * soil_moisture_pct < 60%
+      * humidity_air_pct > 80%
+      * temperature_c > 30°C
+  0 → TIDAK BUTUH SIRAM
 
 Tingkat keparahan (untuk referensi & dokumentasi):
   KRITIS  : soil < 40%         → siram segera
@@ -611,7 +614,7 @@ np.savez_compressed(
 label_info = {
     "soil_threshold" : SOIL_THRESHOLD,
     "look_back"      : LOOK_BACK,
-    "train_ratio"    : TRAIN_RATIO,
+"train_ratio"    : 0.60,
     "features"       : FEATURES,
     "n_features"     : len(FEATURES),
     "train_label_0"  : int((y_train_cls == 0).sum()),
@@ -1271,9 +1274,8 @@ DILARANG menjalankan notebook secara paralel atau melompat urutan.
 
 ## 11. Rule Logika Pengendalian Atap Otomatis
 
-> Pengendalian atap **tidak menggunakan model ML**, melainkan rule-based
-> threshold. Implementasikan sebagai fungsi di `01_preprocessing.ipynb`
-> dan demonstrasikan hasilnya di `04_evaluasi.ipynb`.
+> Roof control is separate IoT system (rule-based, no LSTM involvement).
+> LSTM focuses ONLY on irrigation using 2-of-3 sensor conditions.
 
 ### RULE-ROOF-01: Fungsi Kontrol Atap
 
