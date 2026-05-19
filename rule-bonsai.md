@@ -19,9 +19,10 @@
 8. [Notebook 03 — Testing](#8-notebook-03--testing)
 9. [Notebook 04 — Evaluasi](#9-notebook-04--evaluasi)
 10. [Rule Artefak & File Antara](#10-rule-artefak--file-antara)
-11. [Rule Logika Pengendalian Atap Otomatis](#11-rule-logika-pengendalian-atap-otomatis)
-12. [Rule Reproduksibilitas & Versi](#12-rule-reproduksibilitas--versi)
-13. [Referensi Metrik & Formula](#13-referensi-metrik--formula)
+11. [Rule Logika Pengendalian Penyiraman Otomatis](#11-rule-logika-pengendalian-penyiraman-otomatis)
+12. [Rule Logika Pengendalian Atap Otomatis](#12-rule-logika-pengendalian-atap-otomatis)
+13. [Rule Reproduksibilitas & Versi](#13-rule-reproduksibilitas--versi)
+14. [Referensi Metrik & Formula](#14-referensi-metrik--formula)
 
 ---
 
@@ -393,8 +394,11 @@ DATA_PATH      = "../data/raw/dataset_bonsai_lstm.csv"
 ARTIFACTS_DIR  = "../artifacts"
 TRAIN_RATIO    = 0.60          # 60% training, 40% testing
 LOOK_BACK      = 24            # 24 langkah × 30 menit = 12 jam historis
-SOIL_THRESHOLD = 60.0          # % batas keputusan penyiraman
-FEATURES       = ["temperature_c", "humidity_air_pct", "soil_moisture_pct"]
+SOIL_THRESHOLD           = 60.0 # % batas keputusan penyiraman
+SOIL_SATURATED_THRESHOLD = 80.0 # % batas tanah jenuh, pompa wajib OFF
+TEMP_HIGH_THRESHOLD      = 30.0 # °C batas suhu tinggi
+HUMIDITY_LOW_THRESHOLD   = 50.0 # % batas kelembapan udara rendah
+FEATURES                 = ["temperature_c", "humidity_air_pct", "soil_moisture_pct"]
 
 # Batas valid per sensor
 BOUNDS = {
@@ -554,12 +558,14 @@ print(f"[SEQ] X_test  shape : {X_test.shape}")
 ```
 Inverse-transform y (skala normal) → skala asli (%) sebelum membuat label.
 
-Label biner berdasarkan kondisi multi-sensor (2-of-3):
-  1 → BUTUH PENYIRAMAN if >=2 of 3 conditions:
-      * soil_moisture_pct < 60%
-      * humidity_air_pct > 80%
-      * temperature_c > 30°C
-  0 → TIDAK BUTUH SIRAM
+Label biner target LSTM berdasarkan kondisi kelembapan tanah pada t+1:
+  1 → BUTUH PENYIRAMAN jika soil_moisture_pct < 60%
+  0 → TIDAK BUTUH SIRAM jika soil_moisture_pct >= 60%
+
+Catatan:
+  Keputusan akhir pompa tidak hanya mengikuti label/prediksi LSTM.
+  Pompa tetap dikendalikan oleh aturan safety pada RULE-IRR-01,
+  terutama proteksi overwatering ketika soil_moisture aktual > 80%.
 
 Tingkat keparahan (untuk referensi & dokumentasi):
   KRITIS  : soil < 40%         → siram segera
@@ -1272,10 +1278,86 @@ DILARANG menjalankan notebook secara paralel atau melompat urutan.
 
 ---
 
-## 11. Rule Logika Pengendalian Atap Otomatis
+## 11. Rule Logika Pengendalian Penyiraman Otomatis
+
+> Irrigation control combines LSTM prediction and current sensor readings.
+> The current soil moisture safety guard has higher priority than prediction.
+
+### RULE-IRR-01: Fungsi Kontrol Pompa Air
+
+```python
+def irrigation_control(
+    temp_c: float,
+    humidity_air: float,
+    soil_moisture_actual: float,
+    predicted_soil_moisture: float,
+    soil_threshold: float = 60.0,
+    saturated_threshold: float = 80.0,
+    temp_high_threshold: float = 30.0,
+    humidity_low_threshold: float = 50.0,
+) -> str:
+    """
+    Menentukan status pompa air berdasarkan sensor aktual dan prediksi LSTM.
+
+    Prioritas utama:
+      - Jika soil_moisture_actual > 80%, pompa wajib OFF walaupun LSTM
+        memprediksi tanah akan membutuhkan penyiraman.
+
+    Pompa ON hanya jika tanah aktual tidak jenuh dan salah satu kondisi terpenuhi:
+      1. soil_moisture_actual < 60% atau predicted_soil_moisture < 60%
+      2. temp_c > 30°C, humidity_air < 50%, dan predicted_soil_moisture < 60%
+
+    Sensor error (nilai di luar batas valid):
+      → default OFF untuk mencegah penyiraman yang tidak aman.
+
+    Returns: "ON" | "OFF"
+    """
+    sensor_ok = (
+        10 <= temp_c <= 45 and
+        0  <  humidity_air <= 100 and
+        0  <= soil_moisture_actual <= 100 and
+        0  <= predicted_soil_moisture <= 100
+    )
+    if not sensor_ok:
+        return "OFF"
+
+    # Proteksi overwatering: sensor aktual selalu mengalahkan prediksi.
+    if soil_moisture_actual > saturated_threshold:
+        return "OFF"
+
+    current_or_predicted_dry = (
+        soil_moisture_actual < soil_threshold or
+        predicted_soil_moisture < soil_threshold
+    )
+    early_prevention = (
+        temp_c > temp_high_threshold and
+        humidity_air < humidity_low_threshold and
+        predicted_soil_moisture < soil_threshold
+    )
+
+    if current_or_predicted_dry or early_prevention:
+        return "ON"
+    return "OFF"
+```
+
+### RULE-IRR-02: Prioritas Overwatering
+
+```
+Jika predicted_soil_moisture < 60% tetapi soil_moisture_actual > 80%:
+  → pompa OFF
+
+Alasan:
+  Tanah aktual masih jenuh, sehingga penyiraman tambahan berisiko
+  menyebabkan overwatering. Prediksi LSTM tidak boleh menimpa proteksi ini.
+```
+
+---
+
+## 12. Rule Logika Pengendalian Atap Otomatis
 
 > Roof control is separate IoT system (rule-based, no LSTM involvement).
-> LSTM focuses ONLY on irrigation using 2-of-3 sensor conditions.
+> LSTM prediction is used by irrigation control, while roof control uses
+> only current sensor readings.
 
 ### RULE-ROOF-01: Fungsi Kontrol Atap
 
@@ -1316,7 +1398,7 @@ Jika sensor error → status TUTUP tanpa exception, tanpa delay.
 
 ---
 
-## 12. Rule Reproduksibilitas & Versi
+## 13. Rule Reproduksibilitas & Versi
 
 ### RULE-REPRO-01: Seed Global (Wajib di Cell 3 Setiap Notebook)
 
@@ -1365,7 +1447,7 @@ for lib, ver in libs.items():
 
 ---
 
-## 13. Referensi Metrik & Formula
+## 14. Referensi Metrik & Formula
 
 | Metrik | Formula | Target Minimum |
 |---|---|---|
